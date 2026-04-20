@@ -20,18 +20,117 @@ hc_abort() {
     fi
 }
 
+_hc_restore_config() {
+    [ -f "$TEMP_HERMES_HOME/config.yaml" ] || return 0
+
+    local _cfg="$TEMP_HERMES_HOME/config.yaml"
+
+    if [ "$HC_STICKY" != true ]; then
+        local _changed=false
+
+        # For each field we modified, restore the original only if hermes did not change it
+        local _paths=(
+            ".model.default"
+            ".model.provider"
+            ".model.base_url"
+            ".auxiliary.compression.model"
+            ".auxiliary.compression.provider"
+            ".auxiliary.compression.base_url"
+        )
+        local _set_vals=(
+            "$SET_MODEL_DEFAULT"
+            "$SET_MODEL_PROVIDER"
+            "$SET_MODEL_BASE_URL"
+            "$SET_COMP_MODEL"
+            "$SET_COMP_PROVIDER"
+            "$SET_COMP_BASE_URL"
+        )
+        local _orig_vals=(
+            "$ORIG_MODEL_DEFAULT"
+            "$ORIG_MODEL_PROVIDER"
+            "$ORIG_MODEL_BASE_URL"
+            "$ORIG_COMP_MODEL"
+            "$ORIG_COMP_PROVIDER"
+            "$ORIG_COMP_BASE_URL"
+        )
+
+        local _i _cur_val
+        for _i in "${!_paths[@]}"; do
+            _cur_val=$(yq "${_paths[$_i]}" "$_cfg")
+            if [ "$_cur_val" = "${_set_vals[$_i]}" ]; then
+                if [ -z "${_orig_vals[$_i]}" ] || [ "${_orig_vals[$_i]}" = "null" ]; then
+                    yq -i "del(${_paths[$_i]})" "$_cfg"
+                else
+                    export _HC_RESTORE_VAL="${_orig_vals[$_i]}"
+                    yq -i "${_paths[$_i]} = env(_HC_RESTORE_VAL)" "$_cfg"
+                    unset _HC_RESTORE_VAL
+                fi
+            else
+                _changed=true
+            fi
+        done
+
+        # custom_providers: compare as JSON
+        local _cur_cp
+        _cur_cp=$(yq -o=json '.custom_providers' "$_cfg")
+        if [ "$_cur_cp" = "$SET_CUSTOM_PROVIDERS" ]; then
+            if [ -z "$ORIG_CUSTOM_PROVIDERS" ] || [ "$ORIG_CUSTOM_PROVIDERS" = "null" ]; then
+                yq -i 'del(.custom_providers)' "$_cfg"
+            else
+                export _HC_RESTORE_VAL="$ORIG_CUSTOM_PROVIDERS"
+                yq -i '.custom_providers = env(_HC_RESTORE_VAL)' "$_cfg"
+                unset _HC_RESTORE_VAL
+            fi
+        else
+            _changed=true
+        fi
+
+        if [ "$_changed" = true ]; then
+            echo "Note: hermes modified model/provider config; those changes have been preserved." >&2
+        fi
+    fi
+
+    cp "$_cfg" "${HERMES_REAL_HOME}/config.yaml"
+}
+
 _hc_main() {
 
     # --- Configuration ---
 
     local ENDPOINT="${LOCAL_ENDPOINT:-http://localhost:8080}"
     local CURL_OPTS=(-sf --max-time 5)
-    local HERMES_REAL_HOME="${HERMES_REAL_HOME:-${HOME}/.hermes}"
+    # Global so the EXIT trap can see it after _hc_main returns
+    HERMES_REAL_HOME="${HERMES_REAL_HOME:-${HOME}/.hermes}"
 
+    HC_STICKY=false
     local SESSION_ARGS=()
     local HERMES_EXTRA_ARGS=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)
+                cat <<'HELPEOF'
+Usage: hermes.sh [options] [-- hermes-args...]
+
+Options:
+  -e, --endpoint URL   llama-swap endpoint (default: http://localhost:8080)
+  -r SESSION_ID        Resume a hermes session by ID
+  -c [SESSION_ID]      Continue the most recent session, or a specific one
+  --sticky             Persist model/provider config changes to the real config
+  -h, --help           Show this help message
+  --                   Pass remaining arguments directly to hermes
+
+Environment variables:
+  LOCAL_MODEL          Override model name (skip auto-detection from llama-swap)
+  HERMES_REAL_HOME     Override hermes home directory (default: ~/.hermes)
+
+All unrecognized options are passed through to hermes (e.g. --tui, --yolo).
+HELPEOF
+                return 0
+                ;;
+            --sticky)
+                HC_STICKY=true
+                shift
+                ;;
             -e|--endpoint)
                 if [ -z "${2:-}" ]; then
                     echo "Error: -e/--endpoint requires a URL" >&2
@@ -169,7 +268,7 @@ _hc_main() {
     # Global so the EXIT trap can see it after _hc_main returns
     TEMP_HERMES_HOME=$(mktemp -d /tmp/hermes-XXXXXX)
     # Note: when sourced, this trap replaces any existing EXIT trap in the caller's shell
-    trap 'rm -rf "$TEMP_HERMES_HOME"' EXIT
+    trap '_hc_restore_config; rm -rf "$TEMP_HERMES_HOME"' EXIT
 
     # Symlink everything from the real hermes home into the temp directory
     local item name
@@ -188,13 +287,22 @@ _hc_main() {
     # Also symlink dotfiles/hidden files if any exist
     for item in "${HERMES_REAL_HOME}"/.*; do
         name=$(basename "$item")
+        [[ "$name" == "." || "$name" == ".." ]] && continue
         ln -s "$(readlink -f "$item")" "${TEMP_HERMES_HOME}/${name}"
     done
 
     $_old_nullglob
 
-    # Copy config.yaml and modify model/provider fields with yq
+    # Copy config.yaml and save original model/provider values for restore on exit
     cp "${HERMES_REAL_HOME}/config.yaml" "${TEMP_HERMES_HOME}/config.yaml"
+
+    ORIG_MODEL_DEFAULT=$(yq '.model.default' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_MODEL_PROVIDER=$(yq '.model.provider' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_MODEL_BASE_URL=$(yq '.model.base_url' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_COMP_MODEL=$(yq '.auxiliary.compression.model' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_COMP_PROVIDER=$(yq '.auxiliary.compression.provider' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_COMP_BASE_URL=$(yq '.auxiliary.compression.base_url' "${HERMES_REAL_HOME}/config.yaml")
+    ORIG_CUSTOM_PROVIDERS=$(yq -o=json '.custom_providers' "${HERMES_REAL_HOME}/config.yaml")
 
     local BASE_URL="${ENDPOINT}/v1"
     local PROVIDER_NAME="${ENDPOINT#http://}"
@@ -218,6 +326,15 @@ _hc_main() {
             "model": env(MODEL)
         }])
     ' "${TEMP_HERMES_HOME}/config.yaml"
+
+    # Save the values we set so the exit trap can detect if hermes changed them
+    SET_MODEL_DEFAULT="$MODEL"
+    SET_MODEL_PROVIDER="custom"
+    SET_MODEL_BASE_URL="$BASE_URL"
+    SET_COMP_MODEL="$MODEL"
+    SET_COMP_PROVIDER="custom"
+    SET_COMP_BASE_URL="$BASE_URL"
+    SET_CUSTOM_PROVIDERS=$(yq -o=json '.custom_providers' "${TEMP_HERMES_HOME}/config.yaml")
 
     if [ ! -s "${TEMP_HERMES_HOME}/config.yaml" ]; then
         echo "Error: failed to generate hermes config" >&2

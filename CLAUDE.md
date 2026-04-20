@@ -24,6 +24,9 @@ LOCAL_MODEL=my-model ./hermes.sh
 # Continue the most recent session
 ./hermes.sh -c
 
+# Persist the model/provider config changes permanently
+./hermes.sh --sticky
+
 # Can also be sourced (errors use `return` instead of `exit`)
 source hermes.sh
 ```
@@ -42,7 +45,7 @@ source hermes.sh
 4. Creates a temporary HERMES_HOME directory with symlinks to the user's real hermes home
 5. Copies config.yaml and uses `yq` to surgically update model, provider, base_url, and compression model fields
 6. Launches `hermes` with `HERMES_HOME` set to the temp directory
-7. Cleans up the temp config on exit via `trap`
+7. On exit, copies the temp config back to the real hermes home, restoring the original model/provider fields (unless hermes changed them, or `--sticky` was used)
 
 ## Context Length
 
@@ -54,8 +57,14 @@ The script sets `auxiliary.compression` to use the same local model and endpoint
 
 ## Argument Pass-through
 
-Any flags not handled by this script (`-r`, `-c`) are passed directly to hermes. This supports `--tui`, `--yolo`, `--skills`, `--worktree`, and any other hermes CLI flags.
+Any flags not handled by this script (`-e`, `-r`, `-c`, `--sticky`) are passed directly to hermes. This supports `--tui`, `--yolo`, `--skills`, `--worktree`, and any other hermes CLI flags.
+
+## Config Persistence
+
+On exit, the script copies the temp `config.yaml` back to the real hermes home. For the fields the script modified (model, provider, base_url, compression, custom_providers), it compares the current value against what it set -- if hermes changed a field during the session, that change is preserved; otherwise the original value is restored. All other config changes (settings, personalities, etc.) always persist.
+
+With `--sticky`, the restore step is skipped entirely, so the script's model/provider overrides become permanent.
 
 ## Key Design Decision
 
-Hermes uses `HERMES_HOME` to locate its config directory. The script copies the user's existing `~/.hermes/` to a temp directory, modifies only the model/provider fields in `config.yaml`, and sets `HERMES_HOME` to that temp directory. This preserves all other hermes settings (toolsets, personalities, memory, etc.) while swapping the model configuration.
+Hermes uses `HERMES_HOME` to locate its config directory. The script symlinks the user's existing `~/.hermes/` contents into a temp directory, copies and modifies only `config.yaml`, and sets `HERMES_HOME` to that temp directory. This preserves all other hermes settings (toolsets, personalities, memory, etc.) while swapping the model configuration.

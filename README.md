@@ -8,7 +8,8 @@ A bash script that automatically configures [Hermes Agent](https://github.com/no
 - Works with llama-swap, llama.cpp, and other OpenAI-compatible backends
 - Preserves your existing hermes config (toolsets, personalities, memory, etc.) while swapping the model
 - Points compression model at the local endpoint to avoid external API timeouts
-- Generates a temporary `HERMES_HOME` with updated config and cleans up on exit
+- Persists any config changes hermes makes during the session while restoring model fields on exit
+- Generates a temporary `HERMES_HOME` with updated config
 - Can be sourced (`source hermes.sh`) or executed directly (`./hermes.sh`)
 
 ## Prerequisites
@@ -41,6 +42,9 @@ LOCAL_MODEL=my-model ./hermes.sh
 # Continue a named session
 ./hermes.sh -c "my project"
 
+# Make the model/provider config permanent (don't revert on exit)
+./hermes.sh --sticky
+
 # Pass extra flags through to hermes
 ./hermes.sh --tui --yolo
 ./hermes.sh -c --skills coding
@@ -56,6 +60,8 @@ source hermes.sh
 | `-e, --endpoint <url>` | llama-swap endpoint (default: `http://localhost:8080`) |
 | `-r <session-id>` | Resume an existing hermes session by ID |
 | `-c [name]` | Continue the most recent session, or a named session |
+| `--sticky` | Persist the model/provider config changes permanently |
+| `-h, --help` | Show help message |
 | `--` | All arguments after `--` are passed directly to hermes |
 
 Any flags not recognized by this script (e.g., `--tui`, `--yolo`, `--skills`) are passed through to hermes automatically.
